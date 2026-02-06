@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, User, Calendar, Clock, Download } from 'lucide-react';
+import { ArrowLeft, User, Calendar, Clock, Download, DollarSign, TrendingUp, ExternalLink } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import type { Conversation, FunnelBlock } from '../../lib/database.types';
 import ChatMessage from '../../components/chat/ChatMessage';
@@ -25,12 +25,41 @@ interface Message {
   timestamp: string;
 }
 
+interface TicketData {
+  id: string;
+  ticket_code: string;
+  attribution_id?: string;
+  utm_source?: string;
+  utm_medium?: string;
+  utm_campaign?: string;
+  utm_content?: string;
+  utm_term?: string;
+  fbclid?: string;
+  fbp?: string;
+  fbc?: string;
+  first_landing_page?: string;
+  first_referrer?: string;
+  last_landing_page?: string;
+  last_referrer?: string;
+  user_agent?: string;
+  is_paid: boolean;
+  paid_amount?: number;
+  paid_at?: string;
+  conversion_sent_to_facebook: boolean;
+}
+
 export default function ConversationDetail() {
   const { funnelId, conversationId } = useParams<{ funnelId: string; conversationId: string }>();
   const navigate = useNavigate();
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(true);
+  const [ticketData, setTicketData] = useState<TicketData | null>(null);
+  const [showMarkAsPaid, setShowMarkAsPaid] = useState(false);
+  const [paidAmount, setPaidAmount] = useState('');
+  const [savingPayment, setSavingPayment] = useState(false);
+  const [sendingToFacebook, setSendingToFacebook] = useState(false);
+  const [sendingToUtmify, setSendingToUtmify] = useState(false);
 
   useEffect(() => {
     if (conversationId) {
@@ -48,6 +77,23 @@ export default function ConversationDetail() {
 
       if (convError) throw convError;
       setConversation(convData);
+
+      if (convData) {
+        const leadData = convData.lead_data as Record<string, any>;
+        const ticketCode = leadData?.ticket_code;
+
+        if (ticketCode) {
+          const { data: ticket } = await supabase
+            .from('lead_tickets')
+            .select('*')
+            .eq('ticket_code', ticketCode)
+            .maybeSingle();
+
+          if (ticket) {
+            setTicketData(ticket as TicketData);
+          }
+        }
+      }
 
       const { data: blocksData } = await supabase
         .from('funnel_blocks')
@@ -149,6 +195,154 @@ export default function ConversationDetail() {
     URL.revokeObjectURL(url);
   };
 
+  const handleMarkAsPaid = async () => {
+    if (!ticketData || !paidAmount) {
+      alert('Por favor, insira o valor pago');
+      return;
+    }
+
+    const amount = parseFloat(paidAmount);
+    if (isNaN(amount) || amount <= 0) {
+      alert('Por favor, insira um valor válido');
+      return;
+    }
+
+    setSavingPayment(true);
+    try {
+      const { error } = await supabase
+        .from('lead_tickets')
+        .update({
+          is_paid: true,
+          paid_amount: amount,
+          paid_at: new Date().toISOString(),
+        })
+        .eq('id', ticketData.id);
+
+      if (error) throw error;
+
+      setTicketData({
+        ...ticketData,
+        is_paid: true,
+        paid_amount: amount,
+        paid_at: new Date().toISOString(),
+      });
+
+      setShowMarkAsPaid(false);
+      setPaidAmount('');
+      alert('Lead marcado como pago!');
+    } catch (error) {
+      console.error('Error marking as paid:', error);
+      alert('Erro ao marcar como pago');
+    } finally {
+      setSavingPayment(false);
+    }
+  };
+
+  const handleSendToFacebook = async () => {
+    if (!ticketData) return;
+
+    if (!ticketData.is_paid) {
+      alert('Marque o lead como pago antes de enviar para o Facebook');
+      return;
+    }
+
+    setSendingToFacebook(true);
+    try {
+      const leadData = conversation?.lead_data as Record<string, any>;
+
+      const response = await fetch(
+        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/facebook-conversion`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            ticket_id: ticketData.id,
+            event_name: 'Purchase',
+            value: ticketData.paid_amount,
+            currency: 'MZN',
+            email: leadData?.email,
+            phone: leadData?.contacto || leadData?.phone || leadData?.telefone,
+            first_name: leadData?.nome,
+          }),
+        }
+      );
+
+      const data = await response.json();
+
+      if (!data.success) {
+        throw new Error(data.error || 'Erro ao enviar conversão');
+      }
+
+      const { error: updateError } = await supabase
+        .from('lead_tickets')
+        .update({ conversion_sent_to_facebook: true })
+        .eq('id', ticketData.id);
+
+      if (updateError) throw updateError;
+
+      setTicketData({
+        ...ticketData,
+        conversion_sent_to_facebook: true,
+      });
+
+      alert('Conversão enviada para o Facebook com sucesso!');
+    } catch (error) {
+      console.error('Error sending to Facebook:', error);
+      alert('Erro ao enviar conversão para o Facebook');
+    } finally {
+      setSendingToFacebook(false);
+    }
+  };
+
+  const handleSendToUtmify = async (status: 'waiting_payment' | 'paid') => {
+    if (!ticketData) return;
+
+    if (status === 'paid' && !ticketData.is_paid) {
+      alert('Marque o lead como pago antes de enviar como "pago" para Utmify');
+      return;
+    }
+
+    const amount = status === 'paid' && ticketData.paid_amount ? ticketData.paid_amount : parseFloat(paidAmount || '0');
+
+    if (!amount || amount <= 0) {
+      alert('Por favor, insira um valor válido');
+      return;
+    }
+
+    setSendingToUtmify(true);
+    try {
+      const response = await fetch(
+        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/utmify-conversion`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            ticket_id: ticketData.id,
+            status: status,
+            amount: amount,
+          }),
+        }
+      );
+
+      const data = await response.json();
+
+      if (!data.success) {
+        throw new Error(data.error || 'Erro ao enviar para Utmify');
+      }
+
+      alert(`Evento "${status === 'waiting_payment' ? 'Aguardando Pagamento' : 'Pago'}" enviado para Utmify!\n\nConversão: ${data.conversion_info?.mzn} MZN → $${data.conversion_info?.usd} USD`);
+    } catch (error) {
+      console.error('Error sending to Utmify:', error);
+      alert('Erro ao enviar para Utmify: ' + (error as Error).message);
+    } finally {
+      setSendingToUtmify(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="h-full flex items-center justify-center">
@@ -217,6 +411,112 @@ export default function ConversationDetail() {
       <div className="w-80 bg-white border-l border-gray-200 overflow-y-auto">
         <div className="p-6">
           <h2 className="text-lg font-bold text-gray-900 mb-4">Informações do Lead</h2>
+
+          {ticketData && !ticketData.is_paid && (
+            <div className="mb-4 bg-emerald-50 rounded-lg p-4 border border-emerald-200">
+              {!showMarkAsPaid ? (
+                <button
+                  onClick={() => setShowMarkAsPaid(true)}
+                  className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors font-medium"
+                >
+                  <DollarSign className="w-4 h-4" />
+                  Marcar como Pago
+                </button>
+              ) : (
+                <div className="space-y-3">
+                  <input
+                    type="number"
+                    value={paidAmount}
+                    onChange={(e) => setPaidAmount(e.target.value)}
+                    placeholder="Valor pago (MZN)"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-transparent"
+                    step="0.01"
+                    min="0"
+                  />
+                  <div className="flex gap-2">
+                    <button
+                      onClick={handleMarkAsPaid}
+                      disabled={savingPayment}
+                      className="flex-1 px-3 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors font-medium text-sm disabled:opacity-50"
+                    >
+                      {savingPayment ? 'Salvando...' : 'Confirmar'}
+                    </button>
+                    <button
+                      onClick={() => {
+                        setShowMarkAsPaid(false);
+                        setPaidAmount('');
+                      }}
+                      className="flex-1 px-3 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors font-medium text-sm"
+                    >
+                      Cancelar
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {ticketData && ticketData.is_paid && (
+            <div className="mb-4 space-y-2">
+              <div className="bg-green-50 rounded-lg p-3 border border-green-200">
+                <div className="flex items-center gap-2 text-green-800 mb-1">
+                  <DollarSign className="w-4 h-4" />
+                  <span className="font-medium text-sm">Lead Pago</span>
+                </div>
+                <p className="text-lg font-bold text-green-900">
+                  {ticketData.paid_amount?.toLocaleString('pt-BR', {
+                    style: 'currency',
+                    currency: 'MZN',
+                  })}
+                </p>
+                {ticketData.paid_at && (
+                  <p className="text-xs text-green-700 mt-1">
+                    {new Date(ticketData.paid_at).toLocaleString('pt-BR')}
+                  </p>
+                )}
+              </div>
+
+              {!ticketData.conversion_sent_to_facebook && (
+                <button
+                  onClick={handleSendToFacebook}
+                  disabled={sendingToFacebook}
+                  className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium disabled:opacity-50"
+                >
+                  <TrendingUp className="w-4 h-4" />
+                  {sendingToFacebook ? 'Enviando...' : 'Enviar para Facebook'}
+                </button>
+              )}
+
+              {ticketData.conversion_sent_to_facebook && (
+                <div className="bg-blue-50 rounded-lg p-3 border border-blue-200 flex items-center gap-2 text-blue-800">
+                  <TrendingUp className="w-4 h-4" />
+                  <span className="text-sm font-medium">Enviado para o Facebook</span>
+                </div>
+              )}
+
+              <div className="bg-purple-50 rounded-lg p-3 border border-purple-200">
+                <p className="text-xs font-medium text-purple-900 mb-2">Utmify Integration</p>
+                <div className="space-y-2">
+                  <button
+                    onClick={() => handleSendToUtmify('paid')}
+                    disabled={sendingToUtmify}
+                    className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors font-medium text-sm disabled:opacity-50"
+                  >
+                    <TrendingUp className="w-4 h-4" />
+                    {sendingToUtmify ? 'Enviando...' : 'Enviar como Pago'}
+                  </button>
+                  <button
+                    onClick={() => handleSendToUtmify('waiting_payment')}
+                    disabled={sendingToUtmify}
+                    className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-purple-100 text-purple-700 border border-purple-300 rounded-lg hover:bg-purple-200 transition-colors font-medium text-sm disabled:opacity-50"
+                  >
+                    <Clock className="w-4 h-4" />
+                    {sendingToUtmify ? 'Enviando...' : 'Enviar Aguardando Pagamento'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
 
           <div className="space-y-4">
             <div className="flex items-start gap-3">
@@ -292,6 +592,141 @@ export default function ConversationDetail() {
               </div>
             )}
           </div>
+
+          {ticketData && (
+            <div className="mt-6 pt-6 border-t border-gray-200">
+              <h3 className="text-md font-bold text-gray-900 mb-4">Dados de Tracking</h3>
+
+              <div className="space-y-4">
+                {(ticketData.utm_source || ticketData.utm_medium || ticketData.utm_campaign) && (
+                  <div className="bg-blue-50 rounded-lg p-3 border border-blue-100">
+                    <p className="text-xs font-medium text-blue-900 mb-2">UTM Parameters</p>
+                    <div className="space-y-1">
+                      {ticketData.utm_source && (
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs text-blue-700">Source:</span>
+                          <span className="text-xs font-medium text-blue-900">{ticketData.utm_source}</span>
+                        </div>
+                      )}
+                      {ticketData.utm_medium && (
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs text-blue-700">Medium:</span>
+                          <span className="text-xs font-medium text-blue-900">{ticketData.utm_medium}</span>
+                        </div>
+                      )}
+                      {ticketData.utm_campaign && (
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs text-blue-700">Campaign:</span>
+                          <span className="text-xs font-medium text-blue-900">{ticketData.utm_campaign}</span>
+                        </div>
+                      )}
+                      {ticketData.utm_content && (
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs text-blue-700">Content:</span>
+                          <span className="text-xs font-medium text-blue-900">{ticketData.utm_content}</span>
+                        </div>
+                      )}
+                      {ticketData.utm_term && (
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs text-blue-700">Term:</span>
+                          <span className="text-xs font-medium text-blue-900">{ticketData.utm_term}</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {(ticketData.fbclid || ticketData.fbp || ticketData.fbc) && (
+                  <div className="bg-indigo-50 rounded-lg p-3 border border-indigo-100">
+                    <p className="text-xs font-medium text-indigo-900 mb-2">Facebook Tracking</p>
+                    <div className="space-y-1">
+                      {ticketData.fbclid && (
+                        <div>
+                          <span className="text-xs text-indigo-700">FBCLID:</span>
+                          <p className="text-xs font-mono text-indigo-900 break-all">{ticketData.fbclid}</p>
+                        </div>
+                      )}
+                      {ticketData.fbp && (
+                        <div>
+                          <span className="text-xs text-indigo-700">FBP:</span>
+                          <p className="text-xs font-mono text-indigo-900 break-all">{ticketData.fbp}</p>
+                        </div>
+                      )}
+                      {ticketData.fbc && (
+                        <div>
+                          <span className="text-xs text-indigo-700">FBC:</span>
+                          <p className="text-xs font-mono text-indigo-900 break-all">{ticketData.fbc}</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {(ticketData.first_landing_page || ticketData.last_landing_page) && (
+                  <div className="bg-gray-50 rounded-lg p-3 border border-gray-200">
+                    <p className="text-xs font-medium text-gray-900 mb-2">Landing Pages</p>
+                    <div className="space-y-2">
+                      {ticketData.first_landing_page && (
+                        <div>
+                          <span className="text-xs text-gray-600">First:</span>
+                          <a
+                            href={ticketData.first_landing_page}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-xs text-blue-600 hover:underline break-all flex items-center gap-1"
+                          >
+                            {ticketData.first_landing_page}
+                            <ExternalLink className="w-3 h-3 flex-shrink-0" />
+                          </a>
+                        </div>
+                      )}
+                      {ticketData.last_landing_page && ticketData.last_landing_page !== ticketData.first_landing_page && (
+                        <div>
+                          <span className="text-xs text-gray-600">Last:</span>
+                          <a
+                            href={ticketData.last_landing_page}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-xs text-blue-600 hover:underline break-all flex items-center gap-1"
+                          >
+                            {ticketData.last_landing_page}
+                            <ExternalLink className="w-3 h-3 flex-shrink-0" />
+                          </a>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {(ticketData.first_referrer || ticketData.last_referrer) && (
+                  <div className="bg-gray-50 rounded-lg p-3 border border-gray-200">
+                    <p className="text-xs font-medium text-gray-900 mb-2">Referrers</p>
+                    <div className="space-y-2">
+                      {ticketData.first_referrer && (
+                        <div>
+                          <span className="text-xs text-gray-600">First:</span>
+                          <p className="text-xs text-gray-900 break-all">{ticketData.first_referrer}</p>
+                        </div>
+                      )}
+                      {ticketData.last_referrer && ticketData.last_referrer !== ticketData.first_referrer && (
+                        <div>
+                          <span className="text-xs text-gray-600">Last:</span>
+                          <p className="text-xs text-gray-900 break-all">{ticketData.last_referrer}</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {ticketData.attribution_id && (
+                  <div className="bg-gray-50 rounded-lg p-3 border border-gray-200">
+                    <p className="text-xs font-medium text-gray-900 mb-1">Attribution ID</p>
+                    <p className="text-xs font-mono text-gray-600 break-all">{ticketData.attribution_id}</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>
