@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, TrendingUp, Users, CheckCircle, XCircle, Clock, BarChart3, MessageSquare } from 'lucide-react';
+import { ArrowLeft, TrendingUp, Users, CheckCircle, XCircle, Clock, BarChart3, MessageSquare, DollarSign, Target } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import type { Funnel, FunnelBlock, Conversation } from '../../lib/database.types';
 
@@ -12,6 +12,12 @@ interface BlockStats {
   completion_rate: number;
 }
 
+interface ConversionData {
+  utm_source?: string;
+  paid_count: number;
+  total_revenue: number;
+}
+
 interface FunnelMetrics {
   total_conversations: number;
   completed: number;
@@ -20,6 +26,10 @@ interface FunnelMetrics {
   completion_rate: number;
   avg_completion_time: number;
   block_stats: BlockStats[];
+  total_paid: number;
+  total_revenue: number;
+  conversion_rate: number;
+  sources: ConversionData[];
 }
 
 export default function FunnelAnalytics() {
@@ -29,33 +39,7 @@ export default function FunnelAnalytics() {
   const [metrics, setMetrics] = useState<FunnelMetrics | null>(null);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    if (funnelId) {
-      loadFunnelAndMetrics();
-    }
-  }, [funnelId]);
-
-  const loadFunnelAndMetrics = async () => {
-    setLoading(true);
-    try {
-      const { data: funnelData } = await supabase
-        .from('funnels')
-        .select('*')
-        .eq('id', funnelId)
-        .maybeSingle();
-
-      if (funnelData) {
-        setFunnel(funnelData);
-        await calculateMetrics(funnelId);
-      }
-    } catch (error) {
-      console.error('Error loading funnel:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const calculateMetrics = async (funnelId: string) => {
+  const calculateMetrics = useCallback(async (funnelId: string) => {
     try {
       const { data: conversations } = await supabase
         .from('conversations')
@@ -116,6 +100,32 @@ export default function FunnelAnalytics() {
           };
         });
 
+      const { data: tickets } = await supabase
+        .from('lead_tickets')
+        .select('utm_source, is_paid, paid_amount')
+        .eq('funnel_id', funnelId);
+
+      let totalPaid = 0;
+      let totalRevenue = 0;
+      const sourceMap = new Map<string, ConversionData>();
+
+      if (tickets) {
+        tickets.forEach(ticket => {
+          if (ticket.is_paid && ticket.paid_amount) {
+            totalPaid++;
+            totalRevenue += parseFloat(ticket.paid_amount);
+
+            const source = ticket.utm_source || 'Direct';
+            const existing = sourceMap.get(source) || { utm_source: source, paid_count: 0, total_revenue: 0 };
+            existing.paid_count++;
+            existing.total_revenue += parseFloat(ticket.paid_amount);
+            sourceMap.set(source, existing);
+          }
+        });
+      }
+
+      const sources = Array.from(sourceMap.values()).sort((a, b) => b.total_revenue - a.total_revenue);
+
       setMetrics({
         total_conversations: total,
         completed,
@@ -124,11 +134,41 @@ export default function FunnelAnalytics() {
         completion_rate: total > 0 ? (completed / total) * 100 : 0,
         avg_completion_time: avgTime,
         block_stats: blockStats,
+        total_paid: totalPaid,
+        total_revenue: totalRevenue,
+        conversion_rate: total > 0 ? (totalPaid / total) * 100 : 0,
+        sources,
       });
     } catch (error) {
       console.error('Error calculating metrics:', error);
     }
-  };
+  }, []);
+
+  const loadFunnelAndMetrics = useCallback(async () => {
+    if (!funnelId) return;
+
+    setLoading(true);
+    try {
+      const { data: funnelData } = await supabase
+        .from('funnels')
+        .select('*')
+        .eq('id', funnelId)
+        .maybeSingle();
+
+      if (funnelData) {
+        setFunnel(funnelData);
+        await calculateMetrics(funnelId);
+      }
+    } catch (error) {
+      console.error('Error loading funnel:', error);
+    } finally {
+      setLoading(false);
+    }
+  }, [funnelId, calculateMetrics]);
+
+  useEffect(() => {
+    loadFunnelAndMetrics();
+  }, [loadFunnelAndMetrics]);
 
   const formatTime = (ms: number) => {
     const minutes = Math.floor(ms / 60000);
@@ -220,6 +260,99 @@ export default function FunnelAnalytics() {
             </p>
           </div>
         </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="bg-gradient-to-br from-green-50 to-emerald-50 rounded-lg shadow-sm border border-green-200 p-5">
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-sm font-medium text-green-700">Conversões Pagas</p>
+              <DollarSign className="w-5 h-5 text-green-600" />
+            </div>
+            <p className="text-3xl font-bold text-green-900">{metrics.total_paid}</p>
+            <p className="text-xs text-green-700 mt-1 font-medium">
+              {metrics.conversion_rate.toFixed(1)}% taxa de conversão
+            </p>
+          </div>
+
+          <div className="bg-gradient-to-br from-blue-50 to-indigo-50 rounded-lg shadow-sm border border-blue-200 p-5">
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-sm font-medium text-blue-700">Receita Total</p>
+              <TrendingUp className="w-5 h-5 text-blue-600" />
+            </div>
+            <p className="text-3xl font-bold text-blue-900">
+              {metrics.total_revenue.toLocaleString('pt-BR', {
+                style: 'currency',
+                currency: 'MZN',
+                minimumFractionDigits: 0,
+              })}
+            </p>
+            <p className="text-xs text-blue-700 mt-1">
+              Receita de {metrics.total_paid} pagamentos
+            </p>
+          </div>
+
+          <div className="bg-gradient-to-br from-purple-50 to-pink-50 rounded-lg shadow-sm border border-purple-200 p-5">
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-sm font-medium text-purple-700">Ticket Médio</p>
+              <Target className="w-5 h-5 text-purple-600" />
+            </div>
+            <p className="text-3xl font-bold text-purple-900">
+              {metrics.total_paid > 0
+                ? (metrics.total_revenue / metrics.total_paid).toLocaleString('pt-BR', {
+                    style: 'currency',
+                    currency: 'MZN',
+                    minimumFractionDigits: 0,
+                  })
+                : 'MZN 0'}
+            </p>
+            <p className="text-xs text-purple-700 mt-1">Por conversão paga</p>
+          </div>
+        </div>
+
+        {metrics.sources.length > 0 && (
+          <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+            <div className="flex items-center gap-3 mb-4">
+              <Target className="w-5 h-5 text-blue-600" />
+              <h3 className="text-lg font-semibold text-gray-900">Performance por Fonte (UTM Source)</h3>
+            </div>
+
+            <div className="space-y-3">
+              {metrics.sources.map((source) => (
+                <div key={source.utm_source} className="bg-gray-50 rounded-lg p-4 border border-gray-200">
+                  <div className="flex items-center justify-between mb-2">
+                    <div>
+                      <p className="font-medium text-gray-900">{source.utm_source}</p>
+                      <p className="text-sm text-gray-600">{source.paid_count} conversões</p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-lg font-bold text-emerald-700">
+                        {source.total_revenue.toLocaleString('pt-BR', {
+                          style: 'currency',
+                          currency: 'MZN',
+                          minimumFractionDigits: 0,
+                        })}
+                      </p>
+                      <p className="text-xs text-gray-600">
+                        Ticket médio: {(source.total_revenue / source.paid_count).toLocaleString('pt-BR', {
+                          style: 'currency',
+                          currency: 'MZN',
+                          minimumFractionDigits: 0,
+                        })}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="relative h-2 bg-gray-200 rounded-full overflow-hidden">
+                    <div
+                      className="absolute inset-y-0 left-0 bg-gradient-to-r from-emerald-500 to-green-600 rounded-full"
+                      style={{
+                        width: `${(source.total_revenue / metrics.total_revenue) * 100}%`,
+                      }}
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {metrics.avg_completion_time > 0 && (
           <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-5">
