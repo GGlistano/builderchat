@@ -30,6 +30,10 @@ export interface Database {
           profile_name: string;
           profile_image: string | null;
           profile_image_url: string | null;
+          facebook_pixel_id: string | null;
+          facebook_capi_token: string | null;
+          facebook_test_event_code: string | null;
+          utmify_api_token: string | null;
           is_active: boolean;
           created_at: string;
           updated_at: string;
@@ -41,6 +45,10 @@ export interface Database {
           profile_name: string;
           profile_image?: string | null;
           profile_image_url?: string | null;
+          facebook_pixel_id?: string | null;
+          facebook_capi_token?: string | null;
+          facebook_test_event_code?: string | null;
+          utmify_api_token?: string | null;
           is_active?: boolean;
           created_at?: string;
           updated_at?: string;
@@ -52,6 +60,10 @@ export interface Database {
           profile_name?: string;
           profile_image?: string | null;
           profile_image_url?: string | null;
+          facebook_pixel_id?: string | null;
+          facebook_capi_token?: string | null;
+          facebook_test_event_code?: string | null;
+          utmify_api_token?: string | null;
           is_active?: boolean;
           created_at?: string;
           updated_at?: string;
