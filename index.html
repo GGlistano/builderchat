@@ -12,6 +12,51 @@
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
+    <script>
+(function () {
+  'use strict';
+
+  const TRACK_KEYS = [
+    'utm_source','utm_medium','utm_campaign','utm_content','utm_term',
+    'fbclid','gclid','ttclid','msclkid','utm_id','subid','click_id'
+  ];
+
+  function readAndStore() {
+    const url = new URL(window.location.href);
+    const params = url.searchParams;
+
+    const attribution = {};
+    let found = false;
+
+    TRACK_KEYS.forEach(k => {
+      const v = params.get(k);
+      if (v) { attribution[k] = v; found = true; }
+    });
+
+    // pega referrer se tiver vindo via session (não dá pra ler do domínio 1)
+    // então aqui é só referrer do próprio domínio 2 mesmo:
+    attribution.referrer = document.referrer || '';
+    attribution.timestamp = Date.now();
+
+    if (found) {
+      localStorage.setItem('leadAttribution', JSON.stringify(attribution));
+
+      // limpa a URL (remove os params de tracking)
+      TRACK_KEYS.forEach(k => params.delete(k));
+      window.history.replaceState({}, '', url.pathname + (params.toString()?`?${params}`:'') + url.hash);
+
+      console.log('[UTM Tracking] Salvo:', attribution);
+    }
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', readAndStore);
+  } else {
+    readAndStore();
+  }
+})();
+</script>
+
   </body>
   
 </html>
